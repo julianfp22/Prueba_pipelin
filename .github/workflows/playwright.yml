@@ -8,9 +8,14 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Se crean 3 máquinas en paralelo; cada una ejecuta un tercio de los tests.
   pruebas:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
 
     steps:
       - name: Descargar el código
@@ -28,11 +33,50 @@ jobs:
       - name: Instalar el navegador de Playwright
         run: npx playwright install --with-deps chromium
 
-      - name: Ejecutar las pruebas
-        run: npm test
+      - name: Ejecutar la parte ${{ matrix.shard }} de 3
+        run: npx playwright test --shard=${{ matrix.shard }}/3
+        env:
+          BLOB_REPORT: 'true'
+
+      - name: Guardar el resultado de esta parte
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: blob-report-${{ matrix.shard }}
+          path: blob-report/
+          retention-days: 1
+
+  # Cuando terminan las 3 partes, se unen en un solo reporte.
+  reporte:
+    needs: pruebas
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v7
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Descargar los resultados de las 3 partes
+        uses: actions/download-artifact@v8
+        with:
+          pattern: blob-report-*
+          path: all-blob-reports
+          merge-multiple: true
+
+      - name: Unir en un solo reporte
+        run: npx playwright merge-reports --reporter html ./all-blob-reports
 
       - name: Guardar el reporte
-        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: playwright-report
