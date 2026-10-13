@@ -15,7 +15,8 @@ function resolverUrl(app: string, definicion: DefinicionApp): string | undefined
 }
 
 export function cargarProjects(): PlaywrightTestProject[] {
-  const solicitadas = process.env.APPS?.split(',').map((a) => a.trim()).filter(Boolean);
+  const lista = process.env.APPS?.split(',').map((a) => a.trim()).filter(Boolean);
+  const solicitadas = lista?.length ? lista : undefined; // APPS vacío = todas las aplicaciones
   return readdirSync(RAIZ_APPS, { withFileTypes: true })
     .filter((d) => d.isDirectory() && existsSync(path.join(RAIZ_APPS, d.name, 'app.ts')))
     .filter((d) => !solicitadas || solicitadas.includes(d.name))

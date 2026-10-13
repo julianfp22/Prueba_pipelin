@@ -1,15 +1,88 @@
 name: Pruebas Playwright
 
 on:
+  # Solo se activa si cambia algo dentro de test/apps/ (cualquier app).
   push:
     branches: [main]
+    paths:
+      - 'test/apps/**'
   pull_request:
     branches: [main]
+    paths:
+      - 'test/apps/**'
   workflow_dispatch:
+    inputs:
+      apps:
+        description: 'Aplicaciones a ejecutar, separadas por coma (ej. saucedemo). Vacío = todas'
+        required: false
+        default: ''
 
 jobs:
-  # Se crean 3 máquinas en paralelo; cada una ejecuta un tercio de los tests.
+  # Paso 1: averiguar qué apps cambiaron para ejecutar solo esas.
+  detectar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      apps: ${{ steps.apps.outputs.apps }}
+      ejecutar: ${{ steps.apps.outputs.ejecutar }}
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detectar apps con cambios
+        id: apps
+        env:
+          EVENTO: ${{ github.event_name }}
+          APPS_MANUAL: ${{ inputs.apps }}
+          ANTES: ${{ github.event.before }}
+          DESPUES: ${{ github.sha }}
+          BASE_PR: ${{ github.event.pull_request.base.sha }}
+          HEAD_PR: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENTO" = "workflow_dispatch" ]; then
+            # Ejecución manual: lo que se escribió en el botón (vacío = todas).
+            echo "apps=$APPS_MANUAL" >> "$GITHUB_OUTPUT"
+            echo "ejecutar=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$EVENTO" = "pull_request" ]; then
+            archivos=$(git diff --name-only "$BASE_PR" "$HEAD_PR" -- test/apps || true)
+          else
+            archivos=$(git diff --name-only "$ANTES" "$DESPUES" -- test/apps 2>/dev/null || true)
+          fi
+
+          # Nombre de la app = carpeta dentro de test/apps/, solo si aún existe con su app.ts
+          apps=""
+          for app in $(echo "$archivos" | awk -F/ 'NF>=4 {print $3}' | sort -u); do
+            if [ -f "test/apps/$app/app.ts" ]; then
+              apps="${apps:+$apps,}$app"
+            fi
+          done
+
+          echo "Archivos cambiados:"; echo "$archivos"
+          echo "Apps a ejecutar: ${apps:-ninguna}"
+
+          if [ -z "$archivos" ]; then
+            # No se pudo comparar (ej. primer push de una rama): ejecuta todas.
+            echo "apps=" >> "$GITHUB_OUTPUT"
+            echo "ejecutar=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$apps" ]; then
+            # Cambió algo en test/apps pero no pertenece a ninguna app existente (ej. se borró una app).
+            echo "apps=" >> "$GITHUB_OUTPUT"
+            echo "ejecutar=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "apps=$apps" >> "$GITHUB_OUTPUT"
+            echo "ejecutar=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Paso 2: se crean 3 máquinas en paralelo; cada una ejecuta un tercio de los tests.
   pruebas:
+    needs: detectar
+    if: needs.detectar.outputs.ejecutar == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -34,9 +107,10 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Ejecutar la parte ${{ matrix.shard }} de 3
-        run: npx playwright test --shard=${{ matrix.shard }}/3
+        run: npx playwright test --shard=${{ matrix.shard }}/3 --pass-with-no-tests
         env:
           BLOB_REPORT: 'true'
+          APPS: ${{ needs.detectar.outputs.apps }}
 
       - name: Guardar el resultado de esta parte
         if: always()
@@ -45,11 +119,12 @@ jobs:
           name: blob-report-${{ matrix.shard }}
           path: blob-report/
           retention-days: 1
+          if-no-files-found: ignore
 
-  # Cuando terminan las 3 partes, se unen en un solo reporte.
+  # Paso 3: cuando terminan las 3 partes, se unen en un solo reporte.
   reporte:
     needs: pruebas
-    if: always()
+    if: always() && needs.pruebas.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
